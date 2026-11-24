@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/iago_alves333/crypto-gateway/internal/config"
+	"github.com/iago_alves333/crypto-gateway/internal/middleware"
 	"github.com/iago_alves333/crypto-gateway/internal/proxy"
 )
 
@@ -32,6 +33,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	cryptoAuth, err := middleware.NewCryptoAuth(cfg.HMACSecret, cfg.AESKey, cfg.HMACTolerance)
+	if err != nil {
+		slog.Error("Failed to initialize crypto auth middleware", "error", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -41,9 +48,11 @@ func main() {
 		}
 	})
 	// TODO: (Fase 5) Registre o endpoint `/metrics` usando `promhttp.Handler()`.
-	// TODO: (Fases 3, 4 e 5) Envolva o handler do proxy pelos middlewares:
+	// TODO: (Fases 4 e 5) Envolva `apiHandler` pelos middlewares externos:
 	//       Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
-	mux.Handle("/api/", http.StripPrefix("/api", reverseProxy))
+	var apiHandler http.Handler = http.StripPrefix("/api", reverseProxy)
+	apiHandler = cryptoAuth.Middleware(apiHandler)
+	mux.Handle("/api/", apiHandler)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,

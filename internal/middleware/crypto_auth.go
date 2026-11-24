@@ -1,102 +1,162 @@
 package middleware
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
-// Outros imports sugeridos para quando você for implementar:
-// import (
-// 	"bytes"
-// 	"crypto/aes"
-// 	"crypto/cipher"
-// 	"crypto/hmac"
-// 	"crypto/sha256"
-// 	"crypto/subtle"
-// 	"encoding/hex"
-// 	"io"
-// 	"math"
-// 	"strconv"
-// 	"time"
-// )
+const (
+	headerSignature   = "X-Signature"
+	headerTimestamp   = "X-Timestamp"
+	defaultMaxBodyLen = 1 << 20 // 1 MiB
+)
 
 // CryptoAuth concentra as configurações e chaves da camada de segurança criptográfica do Gateway.
 type CryptoAuth struct {
-	// TODO: Defina os campos necessários:
-	// - Chave secreta para validação HMAC ([]byte)
-	// - Chave secreta para criptografia simétrica AES ([]byte - 16, 24 ou 32 bytes)
-	// - Janela de tolerância de tempo para evitar Replay Attacks (time.Duration)
+	hmacSecret   []byte
+	aesKey       []byte
+	tolerance    time.Duration
+	maxBodyBytes int64
 }
 
 // NewCryptoAuth cria uma nova instância do middleware de autenticação criptográfica.
-func NewCryptoAuth( /* TODO: defina os parâmetros */ ) *CryptoAuth {
-	// TODO: [PASSO A PASSO]
-	// Inicialize e retorne a struct `&CryptoAuth{...}`.
-	return nil
+func NewCryptoAuth(hmacSecret, aesKey string, tolerance time.Duration) (*CryptoAuth, error) {
+	if len(hmacSecret) == 0 {
+		return nil, errors.New("hmac secret must not be empty")
+	}
+	if tolerance <= 0 {
+		return nil, errors.New("hmac tolerance must be positive")
+	}
+	if aesKey != "" && len(aesKey) != 16 && len(aesKey) != 24 && len(aesKey) != 32 {
+		return nil, fmt.Errorf("aes key must be 16, 24, or 32 bytes (got %d)", len(aesKey))
+	}
+
+	return &CryptoAuth{
+		hmacSecret:   []byte(hmacSecret),
+		aesKey:       []byte(aesKey),
+		tolerance:    tolerance,
+		maxBodyBytes: defaultMaxBodyLen,
+	}, nil
 }
 
 // Middleware intercepta a requisição, valida o timestamp e a assinatura HMAC-SHA256 do payload.
 func (ca *CryptoAuth) Middleware(next http.Handler) http.Handler {
-	// TODO: [CONCEITO]
-	// Estude estes 3 pilares fundamentais em Go e Segurança:
-	// 1. Streams de I/O em Go (`io.ReadCloser`): O corpo da requisição (`r.Body`) é uma stream de leitura única.
-	//    Se você ler `r.Body` no middleware para calcular o hash HMAC, o ponteiro de leitura chega ao `EOF`.
-	//    Quando o `ReverseProxy` tentar enviar o body para o backend, ele enviará um corpo VAZIO!
-	//    Estude como ler os bytes para a memória e restaurar `r.Body` usando `io.NopCloser(bytes.NewBuffer(bodyBytes))`.
-	// 2. Timing Attacks e Comparação em Tempo Constante: Por que usar `==` ou `bytes.Equal` para comparar hashes HMAC
-	//    permite que um atacante descubra a assinatura byte a byte medindo nanosegundos de resposta?
-	//    Estude `subtle.ConstantTimeCompare`.
-	// 3. Proteção contra Replay Attacks: Por que assinar apenas o Body não basta? Incluir o `X-Timestamp` no cálculo do HMAC
-	//    impede que alguém intercepte uma requisição válida e a reenvie horas depois.
-	//
-	// TODO: [PASSO A PASSO]
-	// 1. Retorne um `http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ... })`.
-	// 2. Extraia os headers `X-Signature` e `X-Timestamp`. Se algum estiver ausente, retorne `401 Unauthorized`.
-	// 3. Converta `X-Timestamp` para inteiro (`strconv.ParseInt`) e verifique se a diferença para `time.Now().Unix()`
-	//    está dentro da janela tolerada (ex: ±5 minutos). Caso contrário, retorne `401 Unauthorized`.
-	// 4. Proteja a memória limitando a leitura do body (ex: `http.MaxBytesReader`) e leia o conteúdo com `io.ReadAll(r.Body)`.
-	// 5. IMEDIATAMENTE restaure `r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))` para não quebrar o próximo handler!
-	// 6. Calcule a assinatura esperada usando `ca.computeHMAC(timestampStr, bodyBytes)`.
-	// 7. Compare a assinatura recebida com a calculada usando `subtle.ConstantTimeCompare`.
-	// 8. Se for inválida, retorne `401 Unauthorized`. Se for válida, chame `next.ServeHTTP(w, r)`.
-	//
-	// TODO: [DICA DE PACOTE]
-	// - `crypto/hmac` e `crypto/sha256`: `hmac.New(sha256.New, secretKey)`
-	// - `crypto/subtle`: `subtle.ConstantTimeCompare(a, b) == 1` (ou `hmac.Equal(a, b)`)
-	// - `encoding/hex`: `hex.DecodeString` / `hex.EncodeToString`
-	// - `io`: `io.ReadAll`, `io.NopCloser`
-	// - `bytes`: `bytes.NewBuffer` ou `bytes.NewReader`
-	//
-	// TODO: [ARMADILHA COMUM]
-	// - Ler `io.ReadAll(r.Body)` sem impor um limite de tamanho (`http.MaxBytesReader`): um atacante pode enviar
-	//   um payload de 10 GB e causar um crash de Out-Of-Memory (OOM) no seu Gateway antes mesmo de validar o HMAC!
-	// - Comparar apenas a diferença futura ou apenas passada do Timestamp: um relógio levemente adiantado (clock skew)
-	//   ou um timestamp no futuro distante (`9999999999`) passaria se você não checar ambos os lados do intervalo.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sigHeader := strings.TrimSpace(r.Header.Get(headerSignature))
+		tsHeader := strings.TrimSpace(r.Header.Get(headerTimestamp))
+		if sigHeader == "" || tsHeader == "" {
+			slog.Warn("Cabeçalhos de autenticação ausentes", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Cabeçalhos X-Signature e X-Timestamp são obrigatórios.")
+			return
+		}
 
-	return nil
+		ts, err := strconv.ParseInt(tsHeader, 10, 64)
+		if err != nil {
+			slog.Warn("Timestamp inválido", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Cabeçalho X-Timestamp inválido.")
+			return
+		}
+
+		if time.Since(time.Unix(ts, 0)).Abs() > ca.tolerance {
+			slog.Warn("Requisição fora da janela de tolerância HMAC", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Requisição expirada ou com timestamp inválido.")
+			return
+		}
+
+		sigBytes, err := hex.DecodeString(sigHeader)
+		if err != nil {
+			slog.Warn("Assinatura HMAC malformada", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Formato de assinatura inválido.")
+			return
+		}
+
+		var bodyBytes []byte
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, ca.maxBodyBytes)
+			bodyBytes, err = io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if err != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					writeJSONError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Corpo da requisição excede o limite permitido.")
+					return
+				}
+				writeJSONError(w, http.StatusBadRequest, "bad_request", "Falha ao ler o corpo da requisição.")
+				return
+			}
+			// Restaura a stream para que o próximo handler (ex: ReverseProxy) receba o body intacto.
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		expectedMAC := ca.computeHMAC(tsHeader, bodyBytes)
+		if subtle.ConstantTimeCompare(expectedMAC, sigBytes) != 1 {
+			slog.Warn("Assinatura HMAC inválida", "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Assinatura criptográfica inválida.")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
-// computeHMAC é um método auxiliar sugerido para calcular o HMAC-SHA256 de (timestamp + "." + body).
+// computeHMAC calcula o HMAC-SHA256 sobre "<timestamp>.<body>".
 func (ca *CryptoAuth) computeHMAC(timestamp string, body []byte) []byte {
-	// TODO: [PASSO A PASSO]
-	// 1. Crie o hash `mac := hmac.New(sha256.New, ca.hmacSecret)`.
-	// 2. Escreva o timestamp, um separador (ex: `.`) e o body no `mac`.
-	// 3. Retorne `mac.Sum(nil)`.
-	return nil
+	mac := hmac.New(sha256.New, ca.hmacSecret)
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return mac.Sum(nil)
 }
 
-// DecryptAESGCM (Desafio Extra / Opcional) decriptografa um payload ou header cifrado com AES-256-GCM.
+// DecryptAESGCM decriptografa um payload cifrado com AES-GCM cujo nonce vem prefixado nos primeiros bytes.
 func (ca *CryptoAuth) DecryptAESGCM(cipherText []byte) ([]byte, error) {
-	// TODO: [CONCEITO]
-	// Estude Criptografia Autenticada com Dados Associados (AEAD) usando `crypto/aes` e `crypto/cipher` (`cipher.NewGCM`).
-	// Entenda como o `Nonce` (Number used once) funciona, qual o seu tamanho (`gcm.NonceSize()`) e como ele geralmente
-	// vem prefixado nos primeiros bytes do `cipherText`.
-	//
-	// TODO: [DICA DE PACOTE]
-	// - `crypto/aes`: `aes.NewCipher(key)`
-	// - `crypto/cipher`: `cipher.NewGCM(block)`, `gcm.Open(nil, nonce, encryptedData, nil)`
-	//
-	// TODO: [ARMADILHA COMUM]
-	// - Fazer slice do `cipherText[:nonceSize]` sem antes verificar se `len(cipherText) < nonceSize`: isso causará
-	//   um `panic: slice bounds out of range` que pode derrubar a requisição!
-	return nil, nil
+	if len(ca.aesKey) == 0 {
+		return nil, errors.New("aes key not configured")
+	}
+
+	block, err := aes.NewCipher(ca.aesKey)
+	if err != nil {
+		return nil, fmt.Errorf("create aes cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("create gcm: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(cipherText) < nonceSize {
+		return nil, errors.New("ciphertext shorter than nonce size")
+	}
+
+	nonce, encrypted := cipherText[:nonceSize], cipherText[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, encrypted, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt aes-gcm: %w", err)
+	}
+
+	return plaintext, nil
+}
+
+func writeJSONError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":   code,
+		"message": message,
+	})
 }
