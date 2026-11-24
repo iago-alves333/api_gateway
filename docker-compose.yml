@@ -1,90 +1,82 @@
-# ==============================================================================
-# CRYPTO-GATEWAY - DOCKER COMPOSE (SCAFFOLDING EDUCACIONAL)
-# ==============================================================================
-# TODO: [CONCEITO]
-# Estude como o Docker Compose gerencia redes (networks), volumes persistentes
-# e healthchecks entre containers para garantir que serviços dependentes
-# subam de forma isolada e segura.
-#
-# TODO: [PASSO A PASSO]
-# 1. Defina os 4 serviços da nossa infraestrutura local:
-#    - redis: Armazenamento em memória para o Rate Limiting distribuído.
-#    - postgres: Banco relacional (para futuras chaves de API / clientes).
-#    - prometheus: Coletor de métricas (time-series) que fará scrape do gateway.
-#    - grafana: Dashboard visual conectado ao Prometheus como Data Source.
-# 2. Configure mapeamento de portas (ports) para acessar da sua máquina host.
-# 3. Configure volumes nomeados para não perder dados ao reiniciar os containers.
-# 4. Configure uma rede (network) compartilhada para comunicação interna.
-#
-# TODO: [DICA DE CONFIGURAÇÃO]
-# - Para que o Prometheus (dentro do container) consiga acessar o seu Gateway
-#   rodando fora do Docker (via `go run`), pesquise sobre `extra_hosts` com
-#   `host.docker.internal:host-gateway` no Linux!
-#
-# TODO: [ARMADILHA COMUM]
-# - Usar a tag `:latest` em imagens Docker (prefira versões fixas como `redis:7-alpine`,
-#   `postgres:16-alpine`, `prom/prometheus:v2.51.0`, `grafana/grafana:10.4.0`).
-# - Esquecer de definir variáveis obrigatórias do Postgres (`POSTGRES_USER`,
-#   `POSTGRES_PASSWORD`, `POSTGRES_DB`), fazendo o container crashar no boot.
-
 services:
   # ----------------------------------------------------------------------------
-  # 1. REDIS (Rate Limiting & Cache)
+  # 1. REDIS (Rate Limiting Distribuído)
   # ----------------------------------------------------------------------------
-  # redis:
-  #   image: ...
-  #   container_name: ...
-  #   ports:
-  #     - "6379:6379"
-  #   command: ... (Dica: habilite appendonly ou defina senha se desejar)
-  #   healthcheck: ... (Dica: redis-cli ping)
+  redis:
+    image: redis:7.2-alpine
+    container_name: crypto-gateway-redis
+    ports:
+      - "6380:6380"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway_net
 
   # ----------------------------------------------------------------------------
   # 2. POSTGRESQL (Gerenciamento de Clientes / Chaves Criptográficas)
   # ----------------------------------------------------------------------------
-  # postgres:
-  #   image: ...
-  #   container_name: ...
-  #   environment:
-  #     POSTGRES_USER: ...
-  #     POSTGRES_PASSWORD: ...
-  #     POSTGRES_DB: ...
-  #   ports:
-  #     - "5432:5432"
-  #   volumes:
-  #     - ...
+  postgres:
+    image: postgres:16-alpine
+    container_name: crypto-gateway-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-crypto_gateway}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gateway} -d ${POSTGRES_DB:-crypto_gateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway_net
 
   # ----------------------------------------------------------------------------
-  # 3. PROMETHEUS (Coleta de Métricas / Observabilidade)
+  # 3. PROMETHEUS ( Coleta de Métricas / Observabilidade)
   # ----------------------------------------------------------------------------
   # prometheus:
-  #   image: ...
-  #   container_name: ...
+  #   image: prom/prometheus:v2.51.0
+  #   container_name: crypto-gateway-prometheus
   #   ports:
   #     - "9090:9090"
   #   volumes:
   #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
   #   extra_hosts:
   #     - "host.docker.internal:host-gateway"
+  #   networks:
+  #     - gateway_net
 
   # ----------------------------------------------------------------------------
   # 4. GRAFANA (Visualização e Dashboards)
   # ----------------------------------------------------------------------------
   # grafana:
-  #   image: ...
-  #   container_name: ...
+  #   image: grafana/grafana:10.4.0
+  #   container_name: crypto-gateway-grafana
   #   ports:
   #     - "3000:3000"
   #   environment:
   #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
   #   depends_on:
   #     - prometheus
+  #   networks:
+  #     - gateway_net
 
-# volumes:
-#   postgres_data:
-#   redis_data:
-#   grafana_data:
+volumes:
+  postgres_data:
+  redis_data:
+  # grafana_data:
 
-# networks:
-#   gateway_net:
-#     driver: bridge
+networks:
+  gateway_net:
+    driver: bridge

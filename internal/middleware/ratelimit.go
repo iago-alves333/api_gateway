@@ -1,64 +1,86 @@
 package middleware
 
 import (
+	"context"
+	"errors"
+	"log/slog"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
-// Outros imports sugeridos para quando você for implementar:
-// import (
-// 	"fmt"
-// 	"log/slog"
-// 	"net"
-// 	"strconv"
-// 	"time"
-//
-// 	// "crypto-gateway/internal/storage"
-// )
+// RateLimitStore abstrai a verificação atômica de taxa de requisições (implementada por storage.RedisStore).
+type RateLimitStore interface {
+	AllowRequest(ctx context.Context, key string, limit int64, window time.Duration) (allowed bool, remaining int64, resetAfter time.Duration, err error)
+}
 
-// RateLimiter define a estrutura do middleware de controle de taxa de requisições.
+// RateLimiter aplica controle de taxa distribuído por IP de origem.
 type RateLimiter struct {
-	// TODO: Defina as dependências necessárias:
-	// - Referência para o cliente/storage do Redis
-	// - Limite máximo de requisições (int)
-	// - Janela de tempo (time.Duration)
+	store  RateLimitStore
+	limit  int64
+	window time.Duration
 }
 
-// NewRateLimiter instancia o middleware de Rate Limiting com suas configurações e storage.
-func NewRateLimiter( /* TODO: defina os parâmetros */ ) *RateLimiter {
-	// TODO: [PASSO A PASSO]
-	// Inicialize e retorne a struct `&RateLimiter{...}`.
-	return nil
+// NewRateLimiter instancia o middleware de Rate Limiting validando suas dependências e limites.
+func NewRateLimiter(store RateLimitStore, limit int64, window time.Duration) (*RateLimiter, error) {
+	if store == nil {
+		return nil, errors.New("rate limit store must not be nil")
+	}
+	if limit <= 0 {
+		return nil, errors.New("rate limit must be positive")
+	}
+	if window <= 0 {
+		return nil, errors.New("rate limit window must be positive")
+	}
+
+	return &RateLimiter{
+		store:  store,
+		limit:  limit,
+		window: window,
+	}, nil
 }
 
-// Middleware retorna o handler HTTP que intercepta as requisições e aplica o limite de taxa no Redis.
+// Middleware intercepta requisições, consulta o contador atômico no Redis e bloqueia excessos com HTTP 429.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
-	// TODO: [CONCEITO]
-	// Estude:
-	// 1. Algoritmos de Rate Limiting em sistemas distribuídos: Fixed Window Counter vs Sliding Window vs Token Bucket.
-	// 2. Extração segura de IP de cliente em Go (`net.SplitHostPort(r.RemoteAddr)`).
-	// 3. Atomicidade no Redis: Como evitar condições de corrida (Race Conditions) quando duas requisições do mesmo IP chegam no mesmo milissegundo em instâncias diferentes do Gateway.
-	// 4. Estratégia "Fail-Open" vs "Fail-Closed": Se o Redis cair momentaneamente, o seu API Gateway deve bloquear todo o tráfego (Fail-Closed) ou logar o erro e deixar a requisição passar (Fail-Open)?
-	//
-	// TODO: [PASSO A PASSO]
-	// 1. Retorne um `http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ... })`.
-	// 2. Extraia o identificador do cliente (ex: IP via `net.SplitHostPort(r.RemoteAddr)` ou um header de API Key validado).
-	// 3. Monte a chave do Redis (ex: `ratelimit:<ip_do_cliente>`).
-	// 4. Consulte/incremente o contador no Redis passando `r.Context()`.
-	// 5. Preencha os headers padrão de mercado na resposta:
-	//    - `X-RateLimit-Limit`: limite total configurado.
-	//    - `X-RateLimit-Remaining`: quantas requisições ainda restam na janela.
-	// 6. Se o limite foi excedido:
-	//    - Adicione o header `Retry-After` (em segundos).
-	//    - Responda com `http.StatusTooManyRequests` (429) e interrompa o fluxo (`return`).
-	// 7. Se estiver dentro do limite, chame `next.ServeHTTP(w, r)`.
-	//
-	// TODO: [DICA DE PACOTE]
-	// - `net.SplitHostPort`: separa o IP da porta efêmera em `r.RemoteAddr` (ex: `"127.0.0.1:54321"` -> `"127.0.0.1"`).
-	// - `strconv.Itoa` / `strconv.FormatInt`: para escrever os valores numéricos nos headers HTTP.
-	//
-	// TODO: [ARMADILHA COMUM]
-	// - Usar `r.RemoteAddr` direto na chave do Redis sem `net.SplitHostPort`: como `r.RemoteAddr` inclui a porta de origem do cliente (`IP:PORTA`), cada nova conexão TCP teria uma chave diferente no Redis e o Rate Limit nunca bloquearia ninguém!
-	// - Esquecer de colocar o `return` logo após escrever `w.WriteHeader(http.StatusTooManyRequests)`, fazendo com que a requisição bloqueada continue executando `next.ServeHTTP(w, r)`.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := extractClientIP(r)
+		key := "ratelimit:" + clientIP
 
-	return nil
+		allowed, remaining, resetAfter, err := rl.store.AllowRequest(r.Context(), key, rl.limit, rl.window)
+		if err != nil {
+			// Estratégia Fail-Open: uma indisponibilidade momentânea do Redis não derruba a API inteira.
+			slog.Error("Rate limiter store error; allowing request", "client_ip", clientIP, "error", err)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		w.Header().Set("X-RateLimit-Limit", strconv.FormatInt(rl.limit, 10))
+		w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(remaining, 10))
+
+		if !allowed {
+			retryAfter := max(int64(math.Ceil(resetAfter.Seconds())), 1)
+			w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+			slog.Warn("Rate limit exceeded", "client_ip", clientIP, "method", r.Method, "path", r.URL.Path)
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "Limite de requisições excedido. Tente novamente mais tarde.")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// extractClientIP obtém o IP real da conexão TCP sem porta efêmera.
+// Não confia em X-Forwarded-For diretamente para evitar IP spoofing quando o Gateway está na borda.
+func extractClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	if addr := strings.TrimSpace(r.RemoteAddr); addr != "" {
+		return addr
+	}
+	return "unknown"
 }

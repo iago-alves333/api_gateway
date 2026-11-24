@@ -133,13 +133,13 @@ Para proteger os serviços de backend contra abusos ou ataques DDoS, vamos imple
    ```bash
    docker compose up -d redis
    ```
-2. Dispare múltiplas requisições seguidas num loop para estourar o limite configurado (ex: 5 req/min):
+2. Inicie o Gateway com `RATE_LIMIT_REQUESTS=5` e dispare múltiplas requisições seguidas para `/api/get`:
    ```bash
    for i in {1..10}; do
-     curl -s -o /dev/null -w "Req $i: HTTP %{http_code}\n" http://localhost:8080/health
+     curl -s -o /dev/null -w "Req $i: HTTP %{http_code}\n" http://localhost:8080/api/get
    done
    ```
-   *Resultado esperado:* As primeiras requisições retornam `200` e as subsequentes retornam `429`.
+   *Resultado esperado:* As 5 primeiras requisições chegam ao middleware de autenticação (`401` sem HMAC, ou `200` com HMAC válido) e da 6ª em diante retornam `429` diretamente do Rate Limiter (enquanto `/health` continua aberto para healthchecks).
 
 ---
 

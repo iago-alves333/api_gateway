@@ -13,6 +13,7 @@ import (
 	"github.com/iago_alves333/crypto-gateway/internal/config"
 	"github.com/iago_alves333/crypto-gateway/internal/middleware"
 	"github.com/iago_alves333/crypto-gateway/internal/proxy"
+	"github.com/iago_alves333/crypto-gateway/internal/storage"
 )
 
 func main() {
@@ -25,7 +26,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: (Fase 4) Inicialize o cliente Redis (`storage.NewRedisStore`) e garanta o fechamento (`defer`).
+	redisStore, err := storage.NewRedisStore(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	if err != nil {
+		slog.Error("Failed to initialize Redis store", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := redisStore.Close(); err != nil {
+			slog.Warn("Failed to close Redis store", "error", err)
+		}
+	}()
 
 	reverseProxy, err := proxy.NewReverseProxy(cfg.UpstreamURL)
 	if err != nil {
@@ -39,6 +49,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	rateLimiter, err := middleware.NewRateLimiter(redisStore, cfg.RateLimitRequests, cfg.RateLimitWindow)
+	if err != nil {
+		slog.Error("Failed to initialize rate limiter middleware", "error", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -48,10 +64,11 @@ func main() {
 		}
 	})
 	// TODO: (Fase 5) Registre o endpoint `/metrics` usando `promhttp.Handler()`.
-	// TODO: (Fases 4 e 5) Envolva `apiHandler` pelos middlewares externos:
+	// TODO: (Fase 5) Envolva `apiHandler` com o middleware de Observabilidade (Metrics/Logs):
 	//       Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
 	var apiHandler http.Handler = http.StripPrefix("/api", reverseProxy)
 	apiHandler = cryptoAuth.Middleware(apiHandler)
+	apiHandler = rateLimiter.Middleware(apiHandler)
 	mux.Handle("/api/", apiHandler)
 
 	srv := &http.Server{
