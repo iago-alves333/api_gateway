@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/iago_alves333/crypto-gateway/internal/config"
+	"github.com/iago_alves333/crypto-gateway/internal/proxy"
 )
 
 func main() {
@@ -25,7 +26,11 @@ func main() {
 
 	// TODO: (Fase 4) Inicialize o cliente Redis (`storage.NewRedisStore`) e garanta o fechamento (`defer`).
 
-	// TODO: (Fase 2) Instancie o Reverse Proxy apontando para a URL de upstream da configuração.
+	reverseProxy, err := proxy.NewReverseProxy(cfg.UpstreamURL)
+	if err != nil {
+		slog.Error("Failed to initialize reverse proxy", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -36,8 +41,9 @@ func main() {
 		}
 	})
 	// TODO: (Fase 5) Registre o endpoint `/metrics` usando `promhttp.Handler()`.
-	// TODO: (Fase 2) Registre a rota principal do proxy envolvida pelos middlewares das Fases 3, 4 e 5:
+	// TODO: (Fases 3, 4 e 5) Envolva o handler do proxy pelos middlewares:
 	//       Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
+	mux.Handle("/api/", http.StripPrefix("/api", reverseProxy))
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
