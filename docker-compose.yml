@@ -6,7 +6,7 @@ services:
     image: redis:7.2-alpine
     container_name: crypto-gateway-redis
     ports:
-      - "6380:6380"
+      - "6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -41,41 +41,41 @@ services:
       - gateway_net
 
   # ----------------------------------------------------------------------------
-  # 3. PROMETHEUS ( Coleta de Métricas / Observabilidade)
+  # 3. PROMETHEUS (Coleta de Métricas / Observabilidade)
   # ----------------------------------------------------------------------------
-  # prometheus:
-  #   image: prom/prometheus:v2.51.0
-  #   container_name: crypto-gateway-prometheus
-  #   ports:
-  #     - "9090:9090"
-  #   volumes:
-  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-  #   extra_hosts:
-  #     - "host.docker.internal:host-gateway"
-  #   networks:
-  #     - gateway_net
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: crypto-gateway-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - gateway_net
 
   # ----------------------------------------------------------------------------
   # 4. GRAFANA (Visualização e Dashboards)
   # ----------------------------------------------------------------------------
-  # grafana:
-  #   image: grafana/grafana:10.4.0
-  #   container_name: crypto-gateway-grafana
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - GF_SECURITY_ADMIN_PASSWORD=admin
-  #   volumes:
-  #     - grafana_data:/var/lib/grafana
-  #   depends_on:
-  #     - prometheus
-  #   networks:
-  #     - gateway_net
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: crypto-gateway-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - gateway_net
 
 volumes:
   postgres_data:
   redis_data:
-  # grafana_data:
+  grafana_data:
 
 networks:
   gateway_net:

@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/iago_alves333/crypto-gateway/internal/config"
 	"github.com/iago_alves333/crypto-gateway/internal/middleware"
 	"github.com/iago_alves333/crypto-gateway/internal/proxy"
@@ -55,6 +57,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	metricsCollector := middleware.NewMetricsCollector()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -63,12 +67,13 @@ func main() {
 			slog.Warn("Failed to write healthcheck response", "error", err)
 		}
 	})
-	// TODO: (Fase 5) Registre o endpoint `/metrics` usando `promhttp.Handler()`.
-	// TODO: (Fase 5) Envolva `apiHandler` com o middleware de Observabilidade (Metrics/Logs):
-	//       Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
+	mux.Handle("GET /metrics", promhttp.Handler())
+
+	// Cadeia de execução: Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
 	var apiHandler http.Handler = http.StripPrefix("/api", reverseProxy)
 	apiHandler = cryptoAuth.Middleware(apiHandler)
 	apiHandler = rateLimiter.Middleware(apiHandler)
+	apiHandler = metricsCollector.Middleware(apiHandler)
 	mux.Handle("/api/", apiHandler)
 
 	srv := &http.Server{
