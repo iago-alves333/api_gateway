@@ -19,7 +19,9 @@ type Config struct {
 	RedisDB           int
 	HMACSecret        string
 	HMACTolerance     time.Duration
+	HMACProtectAll    bool
 	AESKey            string
+	StripPrefix       string
 	RateLimitRequests int64
 	RateLimitWindow   time.Duration
 }
@@ -30,6 +32,10 @@ func Load() (*Config, error) {
 	hmacTolerance, err := getEnvDuration("HMAC_TOLERANCE", 5*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load HMAC_TOLERANCE: %w", err)
+	}
+	hmacProtectAll, err := getEnvBool("HMAC_PROTECT_ALL", false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load HMAC_PROTECT_ALL: %w", err)
 	}
 	rateLimitWindow, err := getEnvDuration("RATE_LIMIT_WINDOW", 1*time.Minute)
 	if err != nil {
@@ -75,7 +81,9 @@ func Load() (*Config, error) {
 		IdleTimeout:       idleTimeout,
 		HMACSecret:        hmacSecret,
 		HMACTolerance:     hmacTolerance,
+		HMACProtectAll:    hmacProtectAll,
 		AESKey:            getEnv("AES_KEY", ""),
+		StripPrefix:       getEnv("STRIP_PREFIX", ""),
 		RateLimitRequests: rateLimitRequests,
 		RateLimitWindow:   rateLimitWindow,
 	}
@@ -114,6 +122,17 @@ func getEnvInt64(key string, fallback, minValue int64) (int64, error) {
 			return 0, fmt.Errorf("environment variable %s must be at least %d", key, minValue)
 		}
 		return intValue, nil
+	}
+	return fallback, nil
+}
+
+func getEnvBool(key string, fallback bool) (bool, error) {
+	if value := os.Getenv(key); value != "" {
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return false, fmt.Errorf("failed to parse bool from environment variable %s: %w", key, err)
+		}
+		return b, nil
 	}
 	return fallback, nil
 }

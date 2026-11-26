@@ -1,0 +1,7 @@
+.git
+.idea
+ROADMAP.md
+docker-compose.yml
+prometheus.yml
+README.md
+scripts

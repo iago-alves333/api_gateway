@@ -58,23 +58,7 @@ func main() {
 	}
 
 	metricsCollector := middleware.NewMetricsCollector()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
-			slog.Warn("Failed to write healthcheck response", "error", err)
-		}
-	})
-	mux.Handle("GET /metrics", promhttp.Handler())
-
-	// Cadeia de execução: Observabilidade (Metrics/Logs) -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
-	var apiHandler http.Handler = http.StripPrefix("/api", reverseProxy)
-	apiHandler = cryptoAuth.Middleware(apiHandler)
-	apiHandler = rateLimiter.Middleware(apiHandler)
-	apiHandler = metricsCollector.Middleware(apiHandler)
-	mux.Handle("/api/", apiHandler)
+	mux := buildMux(cfg, rateLimiter, cryptoAuth, metricsCollector, reverseProxy)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
@@ -112,4 +96,41 @@ func main() {
 	}
 
 	slog.Info("Server exited gracefully")
+}
+
+// buildMux monta o roteador HTTP separando rotas de webhooks protegidas por HMAC das rotas padrão de API.
+func buildMux(
+	cfg *config.Config,
+	rateLimiter *middleware.RateLimiter,
+	cryptoAuth *middleware.CryptoAuth,
+	metricsCollector *middleware.MetricsCollector,
+	upstream http.Handler,
+) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
+			slog.Warn("Failed to write healthcheck response", "error", err)
+		}
+	})
+	mux.Handle("GET /metrics", promhttp.Handler())
+
+	baseHandler := upstream
+	if cfg.StripPrefix != "" {
+		baseHandler = http.StripPrefix(cfg.StripPrefix, baseHandler)
+	}
+
+	// Cadeia completa para M2M/Webhooks: Observabilidade -> Rate Limit -> Crypto Auth (HMAC) -> Reverse Proxy.
+	protectedHandler := metricsCollector.Middleware(rateLimiter.Middleware(cryptoAuth.Middleware(baseHandler)))
+
+	// Rotas públicas/SPA aplicam Observabilidade + Rate Limit e delegam autenticação de usuário (JWT/CORS) ao upstream.
+	apiHandler := metricsCollector.Middleware(rateLimiter.Middleware(baseHandler))
+	if cfg.HMACProtectAll {
+		apiHandler = protectedHandler
+	}
+
+	mux.Handle("/api/", apiHandler)
+	mux.Handle("/api/v1/webhooks/", protectedHandler)
+	return mux
 }
